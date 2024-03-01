@@ -19,7 +19,7 @@ public class CalculateAverage_first {
 
         @Override
         public String toString() {
-            double avg = Math.round((total * 100.0) / count) / 100.0;
+            double avg = round(total) / count;
             return round(min) + "/" + round(avg) + "/" + round(max);
         }
 
