@@ -6,3 +6,8 @@ setup_evaluate:
 
 .PHONY: setup_evaluate
 
+profile:
+	jbang --javaagent=ap-loader@jvm-profiling-tools/ap-loader=start,event=cpu,file=profile_$(attempt).html -m org.jolly.onebrc.CalculateAverage_$(attempt) target/onebrc-1.0-SNAPSHOT.jar
+
+.PHONY: profile
+

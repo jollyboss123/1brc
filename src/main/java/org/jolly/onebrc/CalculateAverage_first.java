@@ -9,6 +9,13 @@ import java.util.TreeMap;
 
 /**
  * @author jolly
+ *
+ * O(n) time
+ * 1. read file line by line and store in List variable
+ * 2. aggregate into a Map variable but postpone average calculation once loop all lines
+ * </p>
+ * Findings:
+ *
  */
 public class CalculateAverage_first {
     private static final String MEASUREMENTS_FILE = "./measurements.txt";
