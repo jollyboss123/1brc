@@ -14,9 +14,9 @@ if [ "$#" -eq 0 ] || [ "$#" -gt 2 ] || [ "$FORK" = "-h" ]; then
   echo "Note that optional <input file pattern> should be quoted if contains wild cards."
   echo
   echo "Examples:"
-  echo "./test.sh baseline"
-  echo "./test.sh baseline src/test/resources/samples/measurements-1.txt"
-  echo "./test.sh baseline 'src/test/resources/samples/measurements-*.txt'"
+  echo "./test.sh baseline_stream"
+  echo "./test.sh baseline_stream src/test/resources/samples/measurements-1.txt"
+  echo "./test.sh baseline_stream 'src/test/resources/samples/measurements-*.txt'"
   exit 1
 fi
 

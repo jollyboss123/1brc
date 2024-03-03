@@ -17,7 +17,7 @@ import java.util.TreeMap;
  * Findings:
  *
  */
-public class CalculateAverage_first {
+public class CalculateAverage_baseline_loop {
     private static final String MEASUREMENTS_FILE = "./measurements.txt";
     record Result(double min, double max, double total, int count) {
         private Result (double temp) {
@@ -51,13 +51,18 @@ public class CalculateAverage_first {
 
         for (var l : lines) {
             final Measurement m = new Measurement(l.split(";", 2));
-            if (!resultMap.containsKey(m.name)) {
-                resultMap.put(m.name, new Result(m.temp));
-            } else {
-                Result r = resultMap.get(m.name);
-                Result u = new Result(Math.min(m.temp, r.min), Math.max(m.temp, r.max), r.total + m.temp, r.count + 1);
-                resultMap.replace(m.name, u);
-            }
+            resultMap.compute(m.name, (k, v) -> {
+                if (v == null) {
+                    return new Result(m.temp);
+                } else {
+                    return new Result(
+                            Math.min(m.temp, v.min),
+                            Math.max(m.temp, v.max),
+                            v.total + m.temp,
+                            v.count + 1
+                    );
+                }
+            });
         }
 
         System.out.println(resultMap);

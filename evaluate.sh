@@ -130,7 +130,7 @@ if [ ! -f "${MEASUREMENTS_FILE%.txt}.out" ]; then
   echo -e "${BOLD_RED}ERROR${RESET}: ${MEASUREMENTS_FILE%.txt}.out does not exist." >&2
   echo "Please create it with:"
   echo ""
-  echo "  ./calculate_average_baseline.sh > ${MEASUREMENTS_FILE%.txt}.out"
+  echo "  ./calculate_average_baseline_stream.sh > ${MEASUREMENTS_FILE%.txt}.out"
   echo ""
   exit 1
 fi
@@ -272,7 +272,7 @@ for fork in "$@"; do
   fi
 
   # check if Java source file uses Unsafe
-  if grep -F "theUnsafe" -q ./src/main/java*/dev/morling/onebrc/CalculateAverage_$fork.java ; then
+  if grep -F "theUnsafe" -q ./src/main/java*/org/jolly/onebrc/CalculateAverage_$fork.java ; then
     # if notes is not empty, append a comma and space before the unsafe note
     notes="${notes:+$notes, }uses Unsafe"
   fi
@@ -280,7 +280,7 @@ for fork in "$@"; do
   echo -n "$trimmed_mean;" >> $leaderboard_temp_file # for sorting
   echo -n "| # " >> $leaderboard_temp_file
   echo -n "| $trimmed_mean_formatted " >> $leaderboard_temp_file
-  echo -n "| [link](https://github.com/gunnarmorling/1brc/blob/main/src/main/java/dev/morling/onebrc/CalculateAverage_$fork.java)" >> $leaderboard_temp_file
+  echo -n "| [link](https://github.com/jollyboss123/1brc/blob/main/src/main/java/org/jolly/onebrc/CalculateAverage_$fork.java)" >> $leaderboard_temp_file
   echo -n "| $java_version " >> $leaderboard_temp_file
   echo -n "| [$github_user__name](https://github.com/$fork) " >> $leaderboard_temp_file
   echo -n "| $notes " >> $leaderboard_temp_file
@@ -305,6 +305,14 @@ else
   cat $leaderboard_temp_file.sorted | tr '#' ' '
 fi
 echo ""
+
+# Append the new leaderboard entry to the existing leaderboard.txt file
+if [ -f $leaderboard_temp_file.sorted ]; then
+  cat $leaderboard_temp_file.sorted >> "leaderboard.txt"
+fi
+
+# Sort the leaderboard.txt file
+sort -o leaderboard.txt leaderboard.txt
 
 # 5. Cleanup
 rm $leaderboard_temp_file

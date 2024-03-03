@@ -24,7 +24,7 @@ import java.util.stream.Collector;
 
 import static java.util.stream.Collectors.groupingBy;
 
-public class CalculateAverage_baseline {
+public class CalculateAverage_baseline_stream {
 
     private static final String FILE = "./measurements.txt";
 

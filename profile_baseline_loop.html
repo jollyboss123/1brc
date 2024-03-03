@@ -1,0 +1,1781 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px 10px 22px 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {position: fixed; bottom: 0; margin: 0; padding: 2px 3px 2px 3px; outline: 1px solid #ffc000; display: none; overflow: hidden; white-space: nowrap; background-color: #ffffe0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {left: 0}
+	#match {right: 0}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 1008px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>CPU profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/async-profiler/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='status'></p>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<script>
+	// Copyright The async-profiler authors
+	// SPDX-License-Identifier: Apache-2.0
+	'use strict';
+	let root, rootLevel, px, pattern;
+	let level0 = 0, left0 = 0, width0 = 0;
+	let reverse = false;
+	const levels = Array(63);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(key, level, left, width, inln, c1, int) {
+		levels[level0 = level].push({left: left0 += left, width: width0 = width || width0,
+			color: getColor(palette[key & 7]), title: cpool[key >>> 3],
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function u(key, width, inln, c1, int) {
+		f(key, level0 + 1, 0, width, inln, c1, int)
+	}
+
+	function n(key, width, inln, c1, int) {
+		f(key, level0, width0, width, inln, c1, int)
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inline-block' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	function unpack(cpool) {
+		for (let i = 1; i < cpool.length; i++) {
+			cpool[i] = cpool[i - 1].substring(0, cpool[i].charCodeAt(0) - 32) + cpool[i].substring(1);
+		}
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f !== root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f !== root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				status.style.display = 'inline-block';
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.style.display = 'none';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = null;
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+const cpool = [
+'all',
+' AArch64HotSpotBackend_emitCodePrefix_4df06f8763b59ba078c83103b0e6276a171e63d8',
+'>_3b8cdd08b3e33a1b4b54749fb65d884cad77e043',
+'?c96e4391827dd3ce978ae848ebc75a9dca216851',
+'.LoweringProvider_lower_391bfc76f5afbb4e07fe11b41ab8339eb082b11e',
+'\'VectorLoweringPhase_run_371a452c808c9cb737dc6ce55283b791b25ffbaa',
+'?598052dd9faec51a70fa84e5f96b40052e54a013',
+'!bstractMergeNode_simplify_3cd1dd1c30bf20abb06b5e4fb36f840cf8ad1ad5',
+'!ddNode_canonical_5e165472f906ca123c29002d9d90131ea845f2c7',
+'2b09551fa5d5a408e70637b3e8f8e8086659d622f',
+'#ressLoweringHotSpotSuitesProvider_createSuites_8fbe4a8b987f5e25da352fe1b6e8cbee0d5a12af',
+'!lignedChunkRememberedSet_walkDirtyObjects_ca0418edcc5ebf03513303870890773f9a09585f',
+'>Objects_2e9295f5d759d894383fb66ef1f57f604234a621',
+'!rithmeticOpTable$BinaryOp_foldStamp_e9f4ad7d80093e9ee7a70a4c070ae88212569831',
+'"rayCopyCallNode_setLastLocationAccess_1b7b443cc84fd434dbabefabe745d328649c214b',
+'%Deque_grow_c5f6a6aef02e71a21ee6e0cd180f9480a0bf84f3',
+'%List_add_1f41ac6612d40654ece03773af4ead4bc05b3fb8',
+'*indexOfRange_c31c6695677202680845b427a10a5727f82f39cb',
+' Backend_createInstalledCode_70cec85b076723e1ad7284e75a2ef7f91561d4bf',
+'"sePhase_apply_a7a34a5581cb5bc9dd94a67363b0d35949922111',
+'$Tier_run_452c2cb1b8cbe93c2c1e0721e00f05de04a0754a',
+'!inaryArithmeticNode_reassociateMatchedValues_8a0d062ea658fb211ac8d5e8aa1ffe40ad3ab5db',
+'&Node_inferStamp_cfc4fe98a3b3fb1c7ff376535ad7a3673badc589',
+'"tSet_nextSetBit_871836c17579ad5f104533b6633099d94d958a47',
+'!ytecodeParser_buildRootMethod_04f84b001438887d1bcc3b543871092b31f3b430',
+'4_d4a9a54c4a80e0765d371756a8ec7f8f22ae93de',
+'/genIfSame_12a3227eaa1c935525d09968c108744da4d8e5b3',
+'4_7edc243ec8646c8a3ecc603dbe266545e21179b4',
+'5ffdc612874e7f60809d5bf1e11a60ef321d63d23',
+'/handleBytecodeBlock_4c2effa8b96463db18cbd412fa887364e29ba2f8',
+'/isNeverExecutedCode_96d341b7d99e9571e68b5d570c9c7cbf2f6edacd',
+'0terateBytecodesForBlock_b8d5d46f51d55bb4173515fb87841e61b0bdf984',
+'/mayUseSpeculation_68ca01080e9558b158737382f82d2a16087d1c91',
+'/processBlock_68ebe699f7b718f568476f391dfcefa62c2782d2',
+'7ytecode_5a98bc1d0d020235074e8b1301f331781102c86c',
+' CallRelocation::fix_relocation_after_move',
+'"nonicalizable$Binary_canonical_d0a725eb675dd113c9dad4cf8d91b933467c55fa',
+'+erPhase_applyIncremental_924d3fe0837afaa3fca28c1ec2caeec75ebe046f',
+'Db88e1759ca7f80a5819d1b60976504f71f674031',
+'3processNode_26b6441a649f61036379caa2918cc10ce131f6d3',
+':WorkSet_8f51f959decb8e416db097de1bcd10ff3ddf626e',
+'3run_c8b66c0ab6d3545c31da3a81421a49020551ddfb',
+'3tryCanonicalize_cdacfd3d6bb01129f389644eddefbbc953324066',
+'6GlobalValueNumbering_041e8da09dc8c55ade96c7ff6829d8169425f90f',
+'"rdTableBasedRememberedSet_walkDirtyObjects_a889edb950eaea0a17a1de8aef8f04aa5a77e092',
+'!lassLoaderMetaspace::allocate',
+'!odeBuffer::copy_code_to',
+',relocate_code_to',
+'$Installer::initialize_buffer',
+'1stall',
+'/record_scope',
+'/site_Infopoint',
+'"mpilation::Compilation',
+'-build_hir',
+'-compile_java_method',
+'5method',
+'-emit_lir',
+'+Log::log_nmethod',
+'+Task$HotSpotCompilationWrapper_performCompilation_26176fc97ea6d28eeb5ead39f5243f562b8f8a7a',
+']427b3010ad884e165b85b188dcc115cc72ac542f',
+'/_installMethod_aee4bf6e7fd4ee6e283a1db3bf6f2f98ff20b787',
+'0runCompilation_b757e01c868ec3e0e8fed71a764850de44da1a1b',
+'?d1bd90bb87908e90179175e8d6c5e780d0547ca2',
+'+Wrapper_run_d730478f4ce8f539b4955ca0a99f3c6f484bea17',
+'&eBroker::compiler_thread_loop',
+'/invoke_compiler_on_method',
+'\'r::compile_method',
+'(ToVM_installCode0_36cf2e44a5037247275fabde7da16edea7c6d3c1',
+'8_4ca98a048c9a512335c23477fe6eb72524502da0',
+'"nditionalEliminationPhase_run_71bc72b63fabf4627b8203eac64c3bd3fdda2ad7',
+'@abe6ed8386d1d8b8d46d64b4d0c62117480f48f4',
+'#stantLoadOptimization$Optimization$$Lambda$497a3963db8422354577f1b78abefcb0a85355c6_visitValue_2db606b28f24ec958d72bc15f7525bac2978d249',
+'E_apply_329c7cd59aa745ecbf528d992212dca2252e5cb1',
+'8_run_fba127610e6caf30b69d8ee58f3cff842e0c3cbe',
+'#trolFlowGraph$$Lambda$768de9589d03e258b78d16e78a4b2c2c94d40286_accept_9907beaf66f43fa557385f9773a696d1858e1c93',
+'0_computeDominators_d155401babf59d89fbc6265c15e1fd2c9db4dbf6',
+'8FrequenciesFromLocal_3681163c05cecbe372b95db6f3b861eea850941a',
+'C_ddc2498898fe28f6481961651385c86aef7f6631',
+'8LoopBlocks_cbfc171e3541b79ddd05faab23c9d908b3963484',
+'<Information_5297c0e8fb8020688b26cc8492512d184d8cad0b',
+'8Postdominators_d2cead4842e1bd00f873347c1e06712e55169f4c',
+'8_669901a6ae2cfc46f2f30de6af99f1f9b38e933d',
+'1finishLocalLoopFrequency_0542bf76c7ca485e3c45da3f7e91ce3010046cc1',
+'1identifyBlocks_1528316fdf7ce7677bd1187bdf865aecdb8b2aa3',
+'1rpoInnerLoopsFirst_d18d07e00a91c2cc6c5e65bd12ba58d572ef7043',
+'1visitDominatorTreeDefault_ca2e9fddda9052e8739e0a20533646b47d060abb',
+'+Optimizer_run_0b72fbc9f151050842b363490fa410388e52854b',
+' DataOutputStream_writeInt_3316115c0ff4a4a63c69054d42853dff75364597',
+'!eDuplicationPhase_run_75b39980d1c0b7332f2d40b8f2d7e9048d8eac73',
+'"adCodeEliminationPhase_iterateSuccessorsAndInputs_b4ff154aa9c439da9f4203d174d6b67ed784497c',
+'9run_47c24b1436065fd279283d14c09e99a34d17d9a4',
+'"faultHotSpotLoweringProvider_lowerWithoutDelegation_cfb545941ded6081a4f6f89d14ba370b4e9faf7b',
+'D_f4c2fd1010b8200db9662348da0bc04cbc4c26e7',
+'\'JavaLoweringProvider_lowerLoadFieldNode_3dfceb15d2cf0ff2614e10ffb381a6adb964801c',
+'AStoreIndexedNode_8811c28be039811127e28904e91933f7f13c7203',
+'A_76074506d440c4824cb1e8bd2326e66c869fe50b',
+'!uplicationPhase$b_a_9129f957e61cbdc74281782ba187717e5036bbdd',
+'3bl_f6078175ff3a97097ae068ad4d51450204f26de0',
+'3e_7aa6c3a70388eed193bd07aef1dc1b6a23296824',
+'0_run_4082314fd13ecce5b01ac1422dc6f7b648b3692f',
+'58f942cd3670b29a907bad4dbe3f55b1037ea3360',
+' EconomicMapImpl_createHash_972558c7137704d5bde637a6ffdfae7901842e4e',
+'0findHash_595b1a7030b26791e24407c4bc79ff32adf29a73',
+'4Linear_625f9707a6e365be0d43362b3d3e263a2379a503',
+'0getHashArray_72531699322b7c178fab1056cf3c63299d9b2048',
+'0putHashEntry_80907e587e3194bd085c0004313c454a0ce76c0e',
+'3_ae9e160b6339f69145319e61bc353a899542d88d',
+'0remove_c7248592fb373d5fca465358045bc9eac90b204c',
+'(SetNodeEventListener_add_2ceb72b4ac88ebdbdbc528a9e695d3d3f2474749',
+'!dgeMoveOptimizer::optimize',
+';_moves_at_block_begin',
+'!ffectsClosure$1_processLoop_4b03f2972702e8cd5c9f0a493babe3142e8db0ff',
+'._applyEffects_848435acd5e9db1be82dbdeafaa9fb574927cac8',
+'/doMergeWithoutDead_7c5174c5f8388518a97d2bc41b7eff3ab746dd94',
+'/merge_78fc841dfa304cba744e10fa1635f30b2733202a',
+'/processBlock_1f16a567c0a7fccbe42fd7d82db586320eb2cb04',
+'<dc3df8f3cae726f97924bedfed7bf105e1272d69',
+'6Loop_2b95bd691368ed14fb47eb8c53502adf242d6969',
+';8e35ab5155b514368e80e6b65466e67076826609',
+'\'Phase_runAnalysis_1250e036f56bf475b17e7bad33d15be4240ff54c',
+'!ncodedSnippets_decodeSnippetGraph_6db682cbc14398967ba2ffbc141d85f68d5c6e52',
+'0getEncodedSnippet_e1d6099201e94ee3c958e366b3b20d2f7ddb8a54',
+'(peculationReason_encode_bc8a59b565c1c02a5bbe8d5193ca235146ddf1a6',
+'"terpriseMidTier_constructor_d1d285b107e1eefb3c162b5a226601b8cf01aa8d',
+'*PartialUnrollPhase_run_5a64a2dd36ebb5aaa27fad874fed30dd00747ee8',
+'Afcd72481ae66f4638fb169efde6a5c9ccf1ca901',
+'*ReadEliminationPhase$a_processNode_5a5b68b618fb0b786b345ac26316fe8d31a732aa',
+'>_run_34acdd31641c1038200dfbffb2f627530aa48cef',
+' FactoryMethodHolder_AddNode_constructor_de8417542edccb0febdb12a1ec4722b8ca241139_09e862da41278c930f485ceb7d76f8f73e9dd8e9',
+'4HashSet_constructor_48f0998d0e5c09c6e6a0ff9a715c925b1e20964e_cdbf13c9f0253bc5bbe8a002bb522cfaaa2b50ce',
+'5ighTierDuplicationSimulationPhase$a_constructor_2530048e2776b948554d6f5b103379725f21ec89_b62fe90c5722437c246238f8bb957e7598857b68',
+'4IterativeConditionalEliminationPhase_constructor_6ffda390045f3d9c27c00c07dd842e6226b8145d_1f01053ecf3b738b2039cfbcbaeafb4d1aa3b7de',
+'4LoopInversionPhase_constructor_6932237194f6406d94f13e4a1e19dc6dc8818fd1_fb9d2a6f7e4038e0541438a6b2734065af9fb38d',
+'4PEGraphDecoder$PEMethodScope_constructor_4efd8d9486cf67bd9f4f45b5408c5a269482d0fe_dc58838160e9aefb0780dbdf413574b96085e058',
+'4SnippetTemplate_constructor_f79a949d0bcfec6024c39011506bf150e9fc5295_22521476f4cbce02fdc4dc5cd73c7c51c0696136',
+'!inalPartialEscapePhase_run_03bac4557ed42077ee5afe85196c7c046a0f3ff2',
+'<2b1b42c3eb761f95083f0449c79c4179ff8c93c0',
+'"xPointIntervalBuilder_markInInterval_683392b6eb3db25a1a840d8e8e16335d1250b273',
+'#ReadsPhase$RawConditionalEliminationVisitor_enter_9a80739725cc7919078a7afa2261a92e596fcf2c',
+'OprocessNode_44de290e38053ee4d7b3aa267940072f752dbb88',
+'OreplaceConstantInputs_0f1e0f61a267444b83aa9e6f3d339414e74c5dff',
+'-_run_990efcec8383697489f8c2d39c0a78e8481df69b',
+'2a47b4ba8b67f16e392c9f87a0e3b73d2d9fcdbd9',
+'!loatingReadPhase$FloatingReadClosure_processAccess_c07b19d24c84d9c884af10b1594eb132d35b2bdb',
+'MNode_9c196423b284e1e0771a02c2012f5255cb538bc5',
+'1_run_0db8e2761599284aa9322c925915207438e0b1f3',
+'6e2f135654e58f1e2c4be0927b12ee36953af3939',
+'!oreignCallSignature_hashCode_db28dca63ce7d35c0f66c81116b06de7d4a86be2',
+'#matStringEventLog<256ul>::log',
+'@v',
+'!rameStateAssignmentPhase_notApplicableTo_dae38fe64eff7b51154501fb13cb5c8af0f15d50',
+' G1BarrierSet::write_ref_array_pre',
+'"CMConcurrentMarkingTask::work',
+'$RootRegionScanTask::work',
+'$Task::do_marking_step',
+'+rain_local_queue',
+'*make_reference_grey',
+'#oncurrentMark::mark_in_bitmap',
+'2scan_root_region',
+'"EvacuateRegionsBaseTask::work',
+'1Task::scan_roots',
+'"ParScanThreadState::do_copy_to_survivor_space',
+'6trim_queue_to_threshold',
+'"RebuildRSAndScrubTask::G1RebuildRSAndScrubRegionClosure::scan_and_scrub_region',
+'jto_pb',
+'`humongous_region',
+'`large_object',
+'`object',
+'9work',
+'$mSet::scan_heap_roots',
+'"ScanHRForRegionClosure::do_heap_region',
+':scan_heap_roots',
+'?memregion',
+'"WriteBarrierSnippets$G1WriteBarrierLowerer_lower_820ffba2ad95d7c4c8d91b09f32f2d06b1e02f63',
+'Sbd051c9f6c91998f932bf8a85510959d4afce16a',
+'!CImpl_blackenDirtyCardRoots_4d3e087ceb5eb30a853dffb506cb33da87f4ab8e',
+'\'cheneyScanFromDirtyRoots_152b568eb6b8adaa0e9eb97af9f0aaf1c6de3b96',
+'5Roots_382908673147685d145279424cb9368180234ed8',
+'1_9833784d34135699a405dce887934874cbba6206',
+'(ollectOperation_108a3edfdad79517c2b206533a653ca5fe52a12b',
+'.WithoutAllocating_a9c1c4d555d68ece8c1e7086d3ebd4046d549b12',
+'._0c6e127511c920f274c3758a46a72e1205510906',
+'\'doCollectImpl_83d1dcc66311335def4f6f03c4b9e0baf3b23258',
+'0Once_3160ee000a0bd915c7af59cb5e57a0ed89f543eb',
+'\'scanGreyObjects_29ade7946414123fad21ae687f08970df4542d18',
+'*venge_4d80ab5cde8ae47e5684dec80f1899364cc1f1e4',
+'!raalCompiler_emitFrontEnd_ca4f472adcd3262192293d187aa8b916d506307f',
+'%Error_guarantee_99a649a3613ee44e50642b93cdf88fd3e725eda5',
+'#ph$1_hashCode_92f3198c73195708373880ff48298d44eae6a9ee',
+'&ChainedNodeEventListener_changed_845b25c09051c58b0aada208198f22776c79e02b',
+'&NodeEventListener_event_211fe537742d752d33a57fb00329d003f607d262',
+'%Builder::GraphBuilder',
+'.append_with_bci',
+'.invoke',
+'/terate_all_blocks',
+'6bytecodes_for_block',
+'.try_inline',
+'8_full',
+',Phase_run_8c0222d3e24d0841e00f944fbc3d887f95ee0fa3',
+'%Decoder$MethodScope_constructor_8b0c30350aa218553ab17a920d73feafb3a15736',
+',_decodeFloatingNode_03bb2f8f852dd76bf4676b8ecba158d4c6c61b86',
+'3_6772f99e1c932b8170d29b0d4edb3738c283d24a',
+'-ensureNodeCreated_54021bc8dccfb873a68d0631dfe167569fdda560',
+'-makeFixedNodeInputs_50c50f8ff6c582e82e49401009f43345f1f7de97',
+'2loatingNodeInputs_51690c3b5675258c20e8bcd26a237a8effc0d598',
+'-processNextNode_86ca473af99cf2d6ebed9f9072c30958d55c24e7',
+'%NodeIterator_next_36e2d12f950b2aa6a6177d954d4684e130f5efd7',
+'%Util$DefaultSimplifierTool_deleteBranch_0b78d332cc8deea06910f3c7296a8cbf931bac95',
+')_killCFGInner_930739b71d095e3ebb9341498bd03f54d5030195',
+'1_59a7317948800440aed3883e8e435c4989ed0278',
+'.WithUnusedFloatingInputs_81be2d0cbede296c3c85e412410c2d2ed5afa44b',
+'*tryKillUnused_33631943980f077b5bd6e62d486a4e49f7db4e30',
+'%_addDuplicates_d440050f3f5c945d8ec45ee1442501963bce4a65',
+')OrUnique_4906b2a9a19823db731540a40aacd8d53e9d5239',
+'&findDuplicate_96e9806c89cc2fbfc177ffdf4bab21e2ecbe9699',
+'&register_555a98ce7d6e291e9f3ce7e6aa977195b5085fb5',
+'&updateNodeCaches_effe1ef03a6e4176b0196e0d5e5b7850e7b05320',
+'"eyObjectsWalker_walkGreyObjects_eb32754f646620dd6416e9c72990a79fa796f775',
+'$ToBlackObjRefVisitor_visitObjectReferenceInline_6a94fb5989e5a25fa64ad766c55170c982c66635',
+'.ectVisitor_visitObjectInline_c2b66d3dc5c51f3293f46f234daa5dad1f2cb57e',
+' HIRBlock$ModifiableBlock_delete_d5cd184fe036a1f194895725bf263dcde23db4a4',
+'#Loop_numBackedges_38cb0c6f48b1efad70bcedc9ae03a09a3f9ebf42',
+'!eapRegionManager::par_iterate',
+'$WordImpl** HeapRegion::do_oops_on_memregion_in_humongous<G1ScanCardClosure, true>',
+'!ighTierDuplicationSimulationPhase$a$a_f_1fe624c5eebd5fc6cca8cf176992acbbc6f988cf',
+'Gg_357a8e1a8b2921653a74fd19a590db8bab4eab47',
+'Eb_a_63909061ea7c4a1f6e866b604f36b5e64d2f5c97',
+'B_run_62524ba1d30c23516250a8d008bd464546957e67',
+'Gdef56be10e1f60a7d7afe0ea934711bba87bad4d',
+'!otSpotAllocationSnippets$Templates_lower_1de91310b5db113204f7ac9fba43a141440ac376',
+'\'CodeCacheProvider_installCode_3a03b5597e27316aa2c6fde9024f8af0e460e84c',
+')mpiledCodeBuilder_createCompiledCode_be63591e6806c292a291ba207ff13e2e124961e3',
+'3Stream_constructor_78704d0006e64a9fe0bbb8e570877d8c75cec689',
+':writeDebugInfo_a657d88b00a6823cd90c50a6af6b8c9a049db05a',
+'?ReferenceMap_45b7c6a372c646d49e52bd33f700d540d65595f2',
+'?Sites_f354f469d7626763f1b66f6e28d73047d9e87496',
+'\'ForeignCallsProviderImpl_lookupForeignCall_c4f699aabf026008cf05177d8a8518b475967479',
+'\'GraalCompiler_compileHelper_0a0161871a4bb826d56e510d05c94651b1b1ca6e',
+'<Method_0ff35a48b2496422594578a94354f0ef9b35beb7',
+'C1d8dfc2fbb5478d3b7400bbb97604e7defc50a57',
+'<_1975ef7445a45fb1cdca640e8d6289875c5e729a',
+'\'JVMCIRuntime_compileMethod_d0551eb00a95b4c222b2a67a9746353d2d54cfa9',
+'\'ReplacementsImpl_getSnippet_5f8d764843046c4f5164e0433bd1f51589602a27',
+'\'SpeculationLog_encode_b11ee791a66afed70da8b6f8854f75c13db02e4f',
+'6speculate_f3dd1fc9072ab3c608416570ba63aed4be0eadb7',
+'(uitesProvider_createSuites_eaf0c61e8f286dff423d73ccfacd09c49efa0a85',
+' I2C/C2I adapters',
+'!R::IR',
+'$eliminate_null_checks',
+'"Scope::IRScope',
+'!fNode_simplify_1d18ce20bfa14c92ec44b1bbaf802338b155d46b',
+'!ncrementalCanonicalizerPhase_constructor_0c5f124faf5014f324e26c6cc0d1c04365d71359',
+'>run_df61f3c9a4db09c282182fb2b112a4183819f26e',
+'"dexedValueMap_isEmpty_a929c8b477eecfeb872715d76f367430a34bb16f',
+'0putAll_2dca2e024c81e4856241413722146de6cdbb6def',
+'"jectLoopCounterStampsPhase_run_1cbc7fdce2f25e8809471cfb58f2f3d50b3e34ed',
+'Adb6b29dde404fbc2e59952804b54ec080aa60057',
+'"lineCacheBuffer',
+'%ingIterator_queueSuccessors_d6000f3d409a13e17570d47847a3486d74637ccc',
+'(Util_inlineForCanonicalization_78ffbdcb7fc570672f5a7a41e13979bdc14ba5c1',
+'3_bfbeef18e822df5e2f57f280a50213174488448f',
+'"stanceKlass::allocate_instance',
+'/find_method_index',
+'/uncached_lookup_method',
+'"tegerStamp$2_foldStampImpl_5e88519cd3de61e80d03496d2c7469ca43e9ab79',
+',_computeLowerBound_37076fbf8341a4756d5fc18b46a1f01632146d51',
+'.reate_48da92fd02680aed45e4ff5b8b3510938b2595d4',
+'$rval$RegisterBindingLists_addToListSortedByStartAndUsePositions_fd4090358f3b501d65487a31afa5de4bb888be24',
+'(Walker::walk_to',
+'._walkTo_8d59f5a032898b97c09854b3b31b155a80c3c3d1',
+'3_d424156605c3cdd24d5903e3c9741583815a9bf9',
+'!terativeConditionalEliminationPhase_run_0c326f8e71ccf56e637a5a1a0ed8626fce9be1f2',
+'I7cf39b4e01f84dadbaf9453244f0452003a3f58d',
+' JNIEnv_::CallNonvirtualObjectMethod',
+'#JavaCallVariantWrapperHolder_invokeJJIJIJI_J_VA_LIST_Nonvirtual_6f4000c7b26b332becfc76557b165731801a6b35',
+'+WrapperHolder_invoke_AIJI_A_d4894b0d9270757cd39ed473a65118da6476e0a0',
+'!VMCIEnv::call_HotSpotJVMCIRuntime_compileMethod',
+'%Runtime::compile_method',
+'.register_method',
+'!avaThread::thread_main_inner',
+'!vmtiVMObjectAllocEventCollector::JvmtiVMObjectAllocEventCollector',
+' LIRCompilerBackend_emitBackEnd_a54c59324f9fd431297cec276b25f19491888c6d',
+'7Code_93db2832f122afb6281583d420f77d4699100d32',
+'7LIR0_c096467aee01961813bd7a5ee02f31a7740311ed',
+':_5a1d67efe06974514e1bfbc0ca7c180efcf37db0',
+'8owLevel_ede5cdd27aeb67eebff0ae177b2ade6c0dd6e3c9',
+'#GenerationPhase_run_3e70c0384b9eab293fef235c7e6bb525afe4c2a8',
+'#Introspection_visitEach_8b2384cc70641e745b6e26681112a30f29f1a5f8',
+'#PhaseSuite_run_9cddc92170efe0084e0ca63abc797866785fc034',
+'(_apply_0abe16f130971cb2c2bcb3c0f4021bdff4124891',
+'!SStackSlotAllocator$Allocator_allocate_96d41d4b613f6ce196ee0cddad778d2fe7f1d87d',
+'4_run_77d02314289c59f1b3a3b2716621c89512f638ef',
+'!inearScan::allocate_registers',
+',do_linear_scan',
+'*AllocationPhase_apply_0f8205cebf9bde531c92d49e4e20eabf617855ad',
+'*LifetimeAnalysisPhase_buildIntervals_fb20750cc8d8cd8743c45e3643a2b27d1fc4d326',
+'@computeGlobalLiveSets_00f13bbc43472a4c4a6a88e7fa8971e2af6605fa',
+'@lambda$buildIntervals$10_1e152b1f89847010673e01df6ae7de570346e727',
+'@run_fe906bc5273754c013b5dd28221c474246bd5d17',
+'*Order_computeLinearScanOrder_e13e6bb555ee3ac8f4e03b43c1ec5da506b16d38',
+'*Phase_run_6f0119fc1771156cc65e3a52f5cd5be0fb352bc6',
+'*RegisterAllocationPhase_allocateRegisters_1aee00166113ced3baba3fd6a49c1a7332ca045b',
+'Brun_4dee3abfea6c4051c6d8229f947d7a2fc7694a1a',
+',solveDataFlowPhase_resolveDataFlow0_1cb7b7c2c90cab7404213ddd4cc8e79d04b51f82',
+'@un_c2f0845eefd36a0f7861d2f219a420361128389a',
+'*Walker_activateCurrent_db704cec478fed82497435972ec9f9886739cd5e',
+'2llocLockedRegister_d387f6310a37a883b0c4330c07391790f9c46018',
+'1findOptimalSplitPos_a4ddb7794697ac311716a1d505a9841e9a18821b',
+'1splitAndSpillIntersectingIntervals_d469bfa3461da10c6ac494487dad18deaf63d937',
+'Cval_9cd5b1546370b424af479593fa38932602353757',
+'6BeforeUsage_d235cea916e1c5f295f289427ccdd749e1f23e17',
+'*_allocate_845da561cafe3d4c9ce664f5527073b68f8cdd86',
+'#kResolver::linktime_resolve_static_method',
+'.resolve_method',
+'6static_call',
+'A_or_null',
+'!ocationMarkerPhase_run_c5a736b18899a9153429524c7f5de486151ed359',
+'._constructor_9a3a6dab723e639cbf7aa8028cb8c49ba0189c2b',
+'/processInstructionBottomUp_4d60751ff461299e29b5e8373bf45d1ecee22b41',
+'"opEx_canDuplicateLoop_f37df7435846d1a6540a5fb5639739a95dd4058f',
+'$FragmentInside_insertBefore_b413a7262b507102e8d8f62f13e307ad4d839b6b',
+'3nodes_e4ef96711c785a41eb587e9144fca0f1a34d05d4',
+'3patchPeeling_31012327aa093ccc65a38298a54c5dcba9b3d9d6',
+'4rim_5d4943e05e2f29467f737c43224fb0f18bb2b91b',
+',Whole_nodes_a5ae1f09367ab1e0787bdf30416c79cde2c681bb',
+',_computeNodes_687e7131b6e44bbc0e04d5441eb96f884adb5f18',
+'-markFloating_ca65e3acef7e761bc56c513785b416a79f948d6e',
+'%ullUnrollPhase_run_a1df6a444c56ffc37221d7f193bba6c81987de76',
+'8f38e8610e0852a9e93d6f7c4f9e2c1690a4599b6',
+'$RotationPhase_j_ff5fb8ae37404f3ccb00acf2603e83d5abb38a69',
+'2run_f9789cc445b45bc509d369de5e663c04e67a9fdf',
+'$Transformations_fullUnroll_f305b82ce84d079ec79193ca2f242f61da87fd7a',
+'4peel_b8571d4231c20eee821a06b6d9dcff5d704e4500',
+'$Utility_removeObsoleteProxies_91a35070577ab6fb465a331c0a62b259d3fef38e',
+'$VectorizationPhase_a_b5ff8f696f54ff7ecd498958178dff2c177727e2',
+'9eecdec7ad445de4f2518314141466c7e8de3c5b6',
+'7run_0494d3c110ed78b1ad03d86167572bbbcec9b311',
+'"werable_lower_a496cff1f5b148ec4e1bf979d8feb740f58be411',
+'%ingPhase_lower_4c5bde07a86f3c2198e155b3c26ebfdc6cafe6ef',
+'.process_fac61d2d98155da7315d12f46cd6eccf83310ec5',
+'.run_750042402ca9279471f6ea6386601e212ff07524',
+' MarkBasePointersPhase$Marker$BasePointersSet_constructor_85086ad0fdfbe9d792b7f343a4f81d27b0057306',
+'5_run_541155ec985c86fcf6fc3e74bcb315cedd260c9f',
+'"tchContext_captureNamedValue_d6fdea832a4f3c11fb1246c28dcfb9423739413c',
+'%Pattern_matchUsage_0c4e5824ef6118e664c25d22899553cc59cedbb4',
+'81cd68455e114bae1293409621f5db49161a7f15c',
+'!emAllocator::Allocation::notify_allocation',
+'.allocate',
+'"thod::build_profiling_method_data',
+'&Data::allocate',
+' NativeVMOperation_enqueue_8e9693900fe03773a622f8bdf4cb56b579d8dbd2',
+'!odeClass$1_replacement_c77f60d06d07c5a27632f246cbdeb9d9d078b3e1',
+')_addGraphDuplicate_bece5992e0b11b9f5b92b340e77141092ac23773',
+'*createNodeDuplicates_fc862bd1a63f388471475d112432a545427f934b',
+'*valueNumber_9d3760bf2f5fbf760eeec65a171b7d035ff95a12',
+'$Iterator_next_ea5fc1e8882e4c1ce066b9be483823fcd84f3210',
+'$Predicates$AndPredicate_apply_3cf7453fd3965ea126f7014736dc650db2efe488',
+'$SourcePosition_trim_12eefbf1864f405339dd97a88927c82ce58547e9',
+'$UsageIterator_next_5c9c3d818dfd4bc278485168d00257926a0a6d62',
+'$WorkList$IterativeNodeWorkList_add_a4afe43078b88998c8f572492b62583d246020f9',
+',_addAll_56d8efb2cc75aee4de734b4a949ee62c72786a03',
+'$_afterClone_447d9168657de91b66558aa97eef7dc018f7f8ad',
+'%clone_05c9003c4bba4d6504e96c3125a47cb42636be70',
+'%replaceAtAllUsages_6c9f45191e0a773c0e09bdcfabe8e9b98ad2b921',
+'.Usage_b771487f1873d9e442c8cd2b89b831f71bda5bac',
+'!ullCheckEliminator::iterate_one',
+' ObjAllocator::initialize',
+'!ffsetAddressNode_canonical_d6fc17ee0ab2ef5903f1e1899374150de2dfc5d4',
+'!ldGeneration_scanGreyObjects_8ab4845f521688507699f50f61d13f47327f81cd',
+'!ptimizer::eliminate_null_checks',
+'$onValues_get_b13a562300266a4e0a563cc9b39f033cb01c3ca6',
+' PEGraphDecoder_cleanupGraph_13ea438913d68929e19cbd56a0fec118886f6703',
+'"ReadEliminationClosure$ReadEliminationMergeProcessor_mergeReadCache_3329e5156d212b5f246aed428c4f803af7823bb7',
+'\\_bd69797c4fc9b188b5754b8ceee7a315b18d1eee',
+'8_processNode_8179680f2cacf8b88929d673632506bfffe019bf',
+'!artialEscapePhase_postIteration_7c4b4f0a630d61ff5ddec9a6f041dc43176810c7',
+'3run_86fa2801907a33bdfc5b1ce16aaebb1c109c3a07',
+'\'RedundancySchedulePhase$a_a_958e7cd9d5808dd9ec0a0a9d17989f66d3e19cd1',
+'AcalcLatestBlock_29e75555a8a9957af0d268cf121037bd92c0eac5',
+'>_run_9a991c52374391e35d0c55b8d5bb1e7c92f1bf56',
+'!haseSuite_run_2f84da917c48c0b6821adf8a925570cb32c3ed8b',
+'!redicatedProxyNodeIterator_forward_0b274971e4c4bca53c7e0b46d8171c6603300b12',
+'"iorityInliningPhase$a_c_4d79769c232e98973b03f047feb9c31c5dfc723d',
+'8d_35281180326c57b4aa9b9fadc226a101df9a05bb',
+'5_run_00585b1a1a9fc060f33072deb0d4d9fb2f824e33',
+'"ofileInvoke::visit',
+'#pagateEqualityPhase_run_269ce31e43ac6e59a2df81eaab037af083ba3df7',
+';48f99a408a8d37e48e20465834dfdaf44986e8ac',
+' ReadEliminationBlockState$CacheEntry_hashCode_81ee6d68fd6795b12c2d8d1ffd80de62c7ef5cf0',
+'9_killReadCache_23eb5533f0bb0fc962f0586b2a1759fe26a46bfe',
+'/Closure_processNode_cb61e82bda93a6da545c0c87c07fdedf2c148be1',
+'/Phase_run_14d2ec76c2c644ca34c53c94f8d84bb8c1a051a4',
+'9d076a10e27ea17758256c388f31e1b0c763566b5',
+'#ssociationPhase_run_8a14a842cfba48479ba9a31b2ae12556bd864762',
+'7b08af8d9cc0b9846f1cc2e920fdcdb1f8c85512d',
+'"dundantMoveElimination$Optimization_doOptimize_7c9d7e511b843ab770c3a29e1b79f6621a461285',
+'FeliminateMoves_68ff081b1dbf6a5a4720ed5651eccc12e950e7c0',
+'FisEligibleMove_5206fe59eea09e05be035b8e6c99d239e5106695',
+'FsolveDataFlow_0be32a5ca4ced2ad331d6cbb92aec64654b75075',
+'FupdateState_0f10e7ffcc50ec96d22fc75be768e0cb54289311',
+'8_run_392d9be70fce23176d93be82369a81819d16ef74',
+'"entrantBlockIterator_apply_b7364c8da97df6758814b73ec90411979458da06',
+'=e59a94705b73344556dfece0ac9f932e5d1b9272',
+'7processLoop_ecc505ac5598698ce976e0ba78d2a2794bc3fe10',
+'7recurseIntoLoop_ff0d8ed4a126adc91da3bb4fdb2715471a9a7c8f',
+')NodeIterator_apply_e086f8136f3306d21baa52d1c02f612806685e02',
+'"gStackValueSet_putAll_4b66541d65c2f65571a019b79aefcfce7b4ace18',
+'#isterAllocationConfig_getAllocatableRegisters_ca3cd7b5267500341c41d821f57b83fd6a2bcf0e',
+'"location::pd_call_destination',
+'"moveEmptyLoopsPhase_c_e31c7708f1fd51bce7e63ec6b6a5afbef6dfe1df',
+'6run_97e1e6e30bddc2b932967a3a19cdbb9bf3cd6b9c',
+':c39b1829c3e1a22f2e97bcef22a57684887fe26b',
+'"versePostOrder$1OpenLoopsData_loopHasNoExits_e2f23902b22e86a110230964dad9bc8fc866f357',
+'0_compute_22a3ad287169c4622df430b4d5fe4ea6f9af204c',
+'1identifyBlocks_629b47907d9fb02ad451e80c07c58a27d2eb2f05',
+'!untime1::counter_overflow',
+' SchedulePhase$Instance$GuardOrder_propagatePriority_af87dc96ce458cee14d7860579c460f115375aed',
+'BresortGuards_c3e8b3c6bb7aea623c94252febb88009ae18bd03',
+'6_calcLatestBlock_2f40a3156790fa91767f7403ffcf0588ff0f6b00',
+'Fs_62c71a520ed0daef41f066e5b8f46bc9117a93da',
+'7processStackPhi_726507af63e68c535a6759cdcfd3879b072f0536',
+'C_b9fa6372cd65da34a50a248168055e927bfab9bd',
+'7run_7e73e271807aba71da4cb7355ab6e9f58cd76cae',
+'7scheduleEarliestIterative_144c4eda6d5c2facf65580cd281e8f542533d339',
+'8ortIntoList_e8a7bf68f6653c1b3f0652936d86638aca5f965f',
+';NodesLatestWithinBlock_6af2da10a7381e85b3791bd760b11dc9e8c6a2db',
+'Rf984cb4b557a053e1218cfaa318c286c2caa329c',
+'-_run_5ecf94e1cc15110764cade05bd1e67992f8cbec2',
+'2f6a8886a04345dd6074bf898e936990c3e6bd665',
+'!implifyingGraphDecoder_handleFloatingNodeBeforeAdd_3d3d9cf5f642bb4f3afa637df9fdbb61c251e28d',
+'!nippetTemplate$AbstractTemplates_template_bed32b8b81ba04b59b9c4b4a12890488b0ee1acc',
+'/_constructor_c1ab98bc728a8dcfd1dc75ac49ed1ebff3cff762',
+'0explodeLoops_36bbd499dbf27fe4707977b93492ccef1d1d1bcc',
+'0inlineSnippet_31d7cc1f991c213f610cc3c57f8fd49819fdf4b0',
+'2stantiate_e4c5b8f34994a165ba510aae5327dfc0104c2e9b',
+'!tringBuilderOptimizationPhase_a_32745b98b7f191a239f04349b72ce93403a821aa',
+'?b_95d2aba207eb819f415fd2bad4262a75991655f5',
+'?run_3b4afa5bcb624121b63936bf115f17d973e43a13',
+'#ucturedGraph_reduceTrivialMerge_a98c15839f4783d71044478266cff3b776023dd9',
+'!ubstrateArraycopySnippets_doArraycopy_4853bfec7ad839b72daa1b518dc3bf9756daa462',
+'"ites_createSuites_a621e81815f5c354be2acca5b709f64080d70f57',
+' Thread::call_run',
+'&LocalAllocation_slowPathNewArrayLikeObject0_9482f79e6149c3288885e0150a43b3e3f3fbb7aa',
+'F_14bf8d109c130a0ddaaade0f47cdc765ff19c6ba',
+'!ypedGraphNodeIterator_hasNext_805528161132db29c235f5110bc5da35d3bac6ad',
+' Unsafe_AllocateInstance',
+'!seTrappingNullChecksPhase_run_398d39a0ff2b857c43aa8821acc1a8d85c54c507',
+'?556cb55999e2ea3875d9cadf62298138d4cf2bf6',
+'+OperationPhase_tryUseTrappingVersion_4f352e33b2fb3c1bd564e8c3b4ee790040e3de0c',
+' VMOperationControl$WorkQueues_drain_fc251cfc5f5ad2ffe0a4c5f439a2f84dcde8481c',
+'>enqueueAndExecute_607383fb6e6bc84e65ff317d4677ca194ec5dadb',
+'?xecuteAllQueuedVMOperations_25b2bf3190fe2a774058bff8d39933d94865ff3c',
+'!alueNode_inferStamp_d1c8938b84f3a1a6a1f7f68a55ec2db125625db1',
+'!ectorLoweringPhase_run_0aa83334334208bb5c7b5ead885d25cce69f3865',
+'85f1ba0429e943026c16db605fb8a750ece9e7562',
+'&SimplificationPhase_run_c3f23b07784ee8e0a8ae960c893d8302e7c7ac62',
+'>d6dfabe7773e65251b23d6ef98ec3011049b364d',
+'\'nippets$c_a_7032eebe1e91c3319535ee0333c1daa4dcd1dcd0',
+' WorkerThread::run',
+'!riteBarrier_lower_c4b5098a8ad6db960ee49472f6855672f1549b3c',
+' [not_walkable_Java]',
+'!unknown_Java]',
+' __lseek',
+'!platform_strlen',
+'"thread_start',
+'!vsnprintf',
+' a_a_403cf6b4e188c7b7762ce408eddd80fc2eabcb7f',
+'$693ffc35c5ec61e80df13e0c74f064f8bffcc90b',
+'"b_cd286946ccfb49b680a7da2d85b06bd8db2d33d7',
+'!rrayof_oop_disjoint_arraycopy',
+' c2v_installCode0',
+'!iBytecodeStream::get_method',
+'"Env::get_method_by_index_impl',
+'\'lookup_method',
+'\'register_method',
+'"Method::ensure_method_data',
+'!ounter_overflow Runtime1 stub',
+' d$d_a_1ed8e971d96d09c452e15a8d11791e349cf7690a',
+'"l_a_d8bc39efe26fd8ffefb4c504e15b1edbf3395321',
+'!_a_7ecc91bcd62f23045e5e6d5d7a41ad87a895ba12',
+'$997b0b75cf738901654998438664ebe6e3e95ddd',
+'"createMidTier_41fa43cd18d44a433c44f88618a09f0ff815e9c7',
+'(Suites_b965e787faa3ffc996a70affe48ed335a69f6a2f',
+' e_a_3c128863b4f60c9a58217f6eb1e09f52ebe8152d',
+'"monitorEnter_a7baff3aed3995064965fcfbc35bf9dc6349a6fb',
+' f_a_deef362ef4fb84485cfa488429d3f0b064c2eb59',
+'"g_ef09c9d35720b41bcd0a48a68d956e367cd3332c',
+'#etLoopsData_fd43a0511cbd34abcd67a0ae3068d523542d1155',
+'"i_c7a0c99d48ba02540cd08ccdb90b634caf345ffe',
+' h_lower_f280ef653597ce805403fa4ba91dd4a7d5899169',
+' j_a_82bfd732b4b96bc81de15bef57f4a6a8b04430c5',
+'$a8abb10c15254842e809149cb81483c7fa9b8c08',
+'"hS_aa7136ee3f4b1e48f88e3e0855d216ae25786e55',
+'#p_aa67697f1e4d1775674739e5312f8a1a142ec1c3',
+'!ava/io/BufferedReader.fill',
+'7implReadLine',
+'7readLine',
+'(InputStreamReader.read',
+'(PrintStream.println',
+'%lang/AbstractStringBuilder.append',
+'FChars',
+'*Double.parseDouble',
+'*Math.max',
+'*String.<init>',
+'1charAt',
+'3eckIndex',
+'2oder',
+'3mpareTo',
+'1indexOf',
+'1split',
+'2ubstring',
+'1valueOf',
+'0Builder.append',
+'0Latin1.charAt',
+'8ompareTo',
+'7indexOf',
+'>Char',
+'0UTF16.compareTo',
+'=Values',
+':ress',
+'6putCharsSB',
+'*invoke/BootstrapMethodInvoker.invoke',
+'3undMethodHandle$Species_L.copyWithExtendL',
+'B.bindArgumentL',
+'1CallSite.makeSite',
+'1DelegatingMethodHandle$Holder.delegate',
+'2irectMethodHandle$Holder.invokeStatic',
+'KnewInvokeSpecial',
+'C.allocateInstance',
+'1Invokers$Holder.invokeExact_MT',
+'AlinkToTargetMethod',
+'1LambdaFormEditor.bindArgumentL',
+'1MethodHandleNatives.linkCallSite',
+'QImpl',
+'=s.insertArguments',
+'1StringConcatFactory.filterInPrependers',
+'EgenerateMHInlineCopy',
+'EmakeConcatWithConstants',
+'Eprepender',
+'%nio/charset/CharsetDecoder.decode',
+')file/Files.readAllLines',
+'%util/AbstractMap.toString',
+'+rrayList.add',
+'4grow',
+'/s.copyOf',
+'*TreeMap$EntryIterator.next',
+'1.callRemappingFunctionWithCheck',
+'3ompute',
+'2remapValue',
+'*concurrent/locks/ReentrantLock$NonfairSync.initialTryLock',
+'ISync.lock',
+'H.lock',
+'!dk/internal/math/FloatingDecimal.parseDouble',
+'BreadJavaFormatString',
+'.isc/InternalLock.lock',
+'2Unsafe.allocateInstance',
+'-util/ArraysSupport.mismatch',
+'@vectorizedMismatch',
+'!io_vsnprintf',
+' k_a_acf28da3d26dbb2f075e428b965873a5e71ef344',
+'$f3f60641487ebbe4b5db9560bde482ea802571c5',
+' nmethod::new_nmethod',
+'*method',
+')post_compiled_method',
+' org/jolly/onebrc/CalculateAverage_baseline_loop$$Lambda.0x000000040100a208.apply',
+'PMeasurement.<init>',
+'PResult.toString',
+'O.lambda$main$0',
+'Pmain',
+'!s::vsnprintf',
+' pthread_jit_write_protect_np',
+' sun/nio/ch/ChannelInputStream.available',
+'+FileChannelImpl.position',
+'+UnixFileDispatcherImpl.seek',
+'F0',
+')s/StreamDecoder.implRead',
+':nReady',
+'9lockedRead',
+'9read',
+'+UTF_8$Decoder.decodeArrayLoop',
+'?Loop',
+' thread_native_entry',
+'\'start',
+'!lv_get_addr',
+'!rampoline_stub_Relocation::get_trampoline_for',
+' void G1CMTask::process_grey_task_entry<true>',
+'\'ScanCardClosure::do_oop_work<narrowOop>',
+'%OopOopIterateBoundedDispatch<G1RebuildRemSetClosure>::Table::oop_oop_iterate_bounded<ObjArrayKlass, narrowOop>',
+'DScanCardClosure>::Table::oop_oop_iterate_bounded<ObjArrayKlass, narrowOop>',
+'2Dispatch<G1CMOopClosure>::Table::oop_oop_iterate<InstanceKlass, narrowOop>',
+'=RebuildRemSetClosure>::Table::oop_oop_iterate<InstanceKlass, narrowOop>',
+'>ootRegionScanClosure>::Table::oop_oop_iterate<InstanceKlass, narrowOop>'
+];
+unpack(cpool);
+
+n(3,223)
+u(3683,1)
+u(3811)
+u(3324)
+u(4563)
+f(3691,1,1)
+u(1971)
+f(4545,1,1,87,0,3,1)
+f(2059,2,2,1)
+n(3985,3)
+u(4089)
+u(4329,3,0,0,1)
+f(4097,5,1,1)
+u(4089)
+u(4529)
+u(4257)
+u(4265)
+u(4193)
+u(4169)
+u(4233)
+u(4201)
+u(4209)
+u(4297)
+u(4289)
+u(4281)
+u(4305)
+u(4305)
+u(4273)
+u(4185)
+u(4249)
+u(4176)
+f(4361,5,1)
+u(4360)
+f(4073,2,1,18)
+u(4073,18,0,1,1)
+f(4034,4,1,1)
+u(4106)
+u(4042)
+f(4065,4,1,7)
+u(4065)
+u(4126,7,0,7,0)
+f(4130,7,2,5)
+f(4073,4,5,9,0,2,0)
+f(4066,5,4,1)
+u(4122)
+u(4130)
+f(4086,5,1,2,0,2,0)
+n(4338)
+u(4338)
+u(4346)
+u(4346)
+f(4241,2,2,14)
+u(4217)
+u(4225)
+u(4441)
+u(2244,1)
+n(3564,13)
+f(2092,7,1,2)
+u(2780,1)
+u(2772)
+f(2932,8,1)
+f(4563,7,1,10)
+f(4321,2,10,22)
+u(4321,22,0,1,1)
+f(3969,4,1,20,1,0,0)
+f(3969,5,1,19)
+u(3961,18)
+f(3953,7,2,14)
+u(3977)
+u(4625)
+u(4617)
+u(4601)
+u(4313,13)
+u(4641)
+u(4638,13,0,12,1)
+f(4609,12,13,1)
+u(4569)
+u(4577)
+u(4585)
+u(4593)
+u(3699)
+f(4025,7,1)
+u(4025)
+u(4153)
+u(4153)
+f(4097,7,1)
+u(3993)
+u(4001)
+u(4160)
+f(4433,6,1)
+u(4409)
+u(4401)
+u(4398,1,0,1,0)
+f(4337,4,1)
+u(4337)
+u(4345)
+u(4345)
+u(4353)
+u(4358,1,0,1,0)
+u(3755)
+u(1212)
+f(4377,2,1,24)
+f(4058,3,13,10,4,0,0)
+u(4058,10,4,2,0)
+f(4050,5,6,1)
+n(4113,2)
+u(4113)
+u(4454,2,0,1,0)
+f(4462,8,1,1,0,1,0)
+f(4137,5,1)
+u(4150,1,0,1,0)
+f(4385,3,1)
+u(4369)
+u(4513)
+u(4537)
+u(4022,1,0,1,0)
+f(4522,2,1,3,1,1,0)
+f(4010,3,1,2,1,0,0)
+u(4418,2,1,0,0)
+f(4425,5,1,1)
+f(4659,1,1,134)
+u(3715)
+u(4652)
+u(3532)
+u(2236,122)
+u(516)
+u(524)
+u(532,7)
+u(420)
+u(444)
+u(436,6)
+u(428,3)
+u(1980,2)
+u(1996)
+u(1532)
+u(1556)
+u(1564)
+u(1548)
+u(1572,1)
+u(1580)
+u(1540)
+u(3084)
+f(3772,19,1)
+u(3780)
+u(3788)
+u(2524)
+u(2516)
+u(2500)
+u(2508)
+u(2108)
+u(2100)
+f(1988,13,1)
+u(2956)
+u(2924)
+f(452,12,1,2)
+u(2348)
+u(876,1)
+u(884)
+f(2340,14,1)
+u(2148)
+f(3804,12,1)
+u(3804)
+u(2788)
+u(2796)
+u(364)
+f(3796,11,1)
+u(4508)
+u(460)
+u(1188)
+u(1196)
+u(4467)
+u(4556)
+u(3723)
+u(3707)
+f(2220,8,1,115)
+u(2212)
+u(2188)
+u(2195)
+u(2203)
+u(1931)
+u(1915)
+u(1907)
+u(499)
+u(491)
+u(507)
+u(467,112)
+u(475)
+u(483,6)
+u(147)
+u(1843,5)
+u(547)
+u(539,4)
+u(3764)
+u(396)
+u(388,3)
+u(412)
+u(404,2)
+n(4667,1)
+f(2228,28,1)
+u(4492)
+u(4500)
+u(372)
+u(380)
+u(284)
+u(3268)
+u(4676)
+f(1859,25,1)
+u(1883)
+u(1867)
+u(1875)
+f(1851,23,1)
+u(2859)
+f(1923,21,1,106)
+u(1899)
+u(1491,82)
+u(155)
+u(163)
+u(155,76)
+u(43,1)
+u(51)
+f(331,27,1)
+u(323)
+u(315)
+f(707,27,1)
+u(299)
+u(155)
+u(2019)
+u(323)
+f(795,27,1,2)
+u(803)
+u(771,1)
+u(155)
+u(1827)
+u(1819)
+u(1043)
+u(3899)
+u(3867)
+u(651)
+u(131)
+f(779,29,1)
+u(787)
+u(3843)
+u(3819)
+u(3827)
+u(59)
+u(3507)
+f(995,27,1,2)
+u(1003)
+u(155,1)
+u(2043)
+u(2051)
+u(3899)
+u(3867)
+u(651)
+u(667)
+f(2043,29,1)
+f(1019,27,1,3)
+u(955)
+u(2667,1)
+u(3899)
+u(3867)
+u(651)
+u(619)
+u(675)
+u(595)
+u(659)
+f(3219,29,1,2)
+u(3211)
+u(931,1)
+u(3115)
+f(3235,31,1)
+u(947)
+u(939)
+u(3227)
+u(3211)
+u(3235)
+u(947)
+u(939)
+u(3227)
+u(3211)
+u(931)
+u(1011)
+u(3123)
+u(3115)
+u(859)
+f(1091,27,1,8)
+u(1083)
+u(3011)
+u(955)
+u(2667,2)
+u(3899)
+u(3867)
+u(651)
+u(603,1)
+n(635)
+u(1771)
+f(3003,31,1,4)
+u(155)
+u(3043)
+u(155)
+u(795,3)
+u(803)
+u(771)
+u(155)
+u(1827)
+u(1819)
+u(3931)
+u(1803)
+u(1795)
+u(1811)
+f(2619,35,3,1)
+u(2627)
+u(3899)
+u(3867)
+u(651)
+u(667)
+u(3315)
+u(1499)
+f(3219,31,1,2)
+u(3211)
+u(915,1)
+u(907)
+u(2987)
+u(2979)
+u(2843)
+u(2851)
+f(923,33,1)
+u(931)
+u(2995)
+u(835)
+f(1139,27,1,4)
+u(1131)
+u(155,3)
+u(3035)
+u(3379)
+u(3355,1)
+u(3027)
+u(3019)
+f(3387,32,1)
+n(3403)
+u(3411)
+u(3395)
+f(683,29,1)
+u(1107)
+u(1115)
+u(1123)
+f(1171,27,1)
+u(1163)
+u(3243)
+u(1155)
+u(1147)
+u(115)
+u(1515)
+u(867)
+u(843)
+u(811)
+f(2043,27,1)
+u(2051)
+u(3899)
+u(3867)
+u(651)
+u(667)
+u(3315)
+u(3307)
+u(3299)
+u(3051)
+f(2171,27,1)
+u(2179)
+u(155)
+u(555)
+u(563)
+u(3427)
+u(3387)
+u(3339)
+u(3331)
+f(2643,27,1)
+u(2635)
+u(2555)
+u(2571)
+u(2595)
+u(2603)
+u(2611)
+u(2867)
+f(2691,27,1)
+u(2675)
+u(2683)
+u(155)
+u(3291)
+u(3283)
+u(3275)
+u(1691)
+u(1683)
+f(2723,27,1,26)
+u(2707)
+u(155,4)
+u(3419)
+u(3379)
+u(651,2)
+u(635,1)
+n(667)
+u(3315)
+u(3307)
+f(3387,32,1,2)
+f(3371,33,1,1)
+u(3363)
+f(299,29,1)
+u(155)
+u(2019)
+u(323)
+u(315)
+u(339)
+u(2003)
+f(2715,29,1,21)
+u(2699,7)
+u(3915)
+u(35)
+u(739)
+u(731,5)
+u(1835)
+u(3443)
+u(1075)
+u(3451)
+u(155,2)
+u(2723)
+u(2707)
+u(155)
+u(3419)
+u(3379)
+u(651,1)
+u(619)
+u(675)
+f(3355,45,1)
+f(1051,39,1)
+u(819)
+f(3459,39,1,2)
+u(2651)
+u(155,1)
+u(2019)
+u(323)
+u(315)
+u(339)
+u(291)
+u(67)
+u(75)
+u(171)
+f(2659,41,1)
+u(2563)
+u(2579)
+u(2587)
+f(755,34,1)
+n(763)
+u(747)
+u(2907)
+u(2915)
+u(1523)
+u(867)
+u(843)
+u(811)
+f(3675,30,1,14)
+u(3915)
+u(35)
+u(739)
+u(731)
+u(1387,11)
+u(3443,9)
+u(1075)
+u(3451)
+u(155,4)
+u(331,2)
+u(323)
+u(315)
+u(179,1)
+u(107)
+u(2115)
+u(2131)
+u(2123)
+f(339,43,1)
+f(1171,40,1)
+u(1163)
+u(3243)
+u(827)
+f(2723,40,1)
+u(2707)
+u(155)
+u(3419)
+u(3379)
+u(3547)
+u(3539)
+u(1443)
+u(2803)
+u(3603)
+u(3611)
+u(3595)
+u(1435)
+u(1459)
+u(1467)
+u(1483)
+u(1427)
+u(1419)
+u(1475)
+u(2947)
+u(1739)
+u(1755)
+u(1747)
+f(1699,39,1,2)
+u(2811,1)
+n(2827)
+u(2899)
+u(1723)
+u(2963)
+f(1939,39,1,3)
+u(971)
+u(963)
+u(1611)
+u(1643)
+u(1627)
+u(1619)
+u(1603,2)
+u(1635)
+u(1619)
+u(1707)
+u(1715)
+f(819,51,1,1)
+u(1507)
+u(2835)
+f(3435,46,1)
+u(2939)
+u(1027)
+u(107)
+u(2115)
+f(3475,36,1,2)
+u(3467)
+u(2819)
+u(2827)
+u(2891,1)
+n(2899)
+u(1723)
+u(1731)
+f(1395,35,1,3)
+u(3443)
+u(1075)
+u(3451)
+u(155,1)
+u(2723)
+u(2707)
+u(155)
+u(3419)
+u(3379)
+u(3355)
+u(3347)
+f(1939,39,1,2)
+u(971)
+u(963)
+u(1067,1)
+u(1595)
+f(2971,42,1)
+u(3555)
+f(3043,27,1,7)
+u(155)
+u(3627,6)
+u(3635)
+u(3659)
+u(3443)
+u(1075)
+u(3451)
+u(155,1)
+u(2723)
+u(2707)
+u(299)
+u(155)
+u(2019)
+u(323)
+u(315)
+u(339)
+u(2003)
+f(3459,35,1,5)
+u(307,2)
+u(2011)
+u(2883)
+u(1651,1)
+n(2875)
+u(123)
+u(3515)
+f(2651,36,1,2)
+u(155,1)
+u(2019)
+u(323)
+u(315)
+u(347)
+u(1715)
+f(2003,37,1)
+u(1659)
+u(1675)
+u(1667)
+f(3899,36,1)
+u(3867)
+u(651)
+u(619)
+u(595)
+f(3643,29,1)
+u(3651)
+u(723)
+u(715)
+f(3075,27,1,5)
+u(3059)
+u(3067)
+u(3835,3)
+u(3747,1)
+u(3939)
+u(2067)
+f(3835,31,1,2)
+u(3747,1)
+u(3731)
+u(3739)
+u(155)
+u(3043)
+u(155)
+u(1587)
+u(195)
+u(203)
+u(267)
+u(235)
+u(251)
+u(275)
+u(211)
+u(227)
+u(219)
+u(243)
+u(259)
+u(1955)
+u(1947)
+u(979)
+u(699)
+u(3875)
+f(3835,32,1)
+u(3747)
+u(3731)
+u(3739)
+u(155)
+u(3043)
+u(155)
+u(1587)
+u(195)
+u(203)
+u(267)
+u(235)
+u(251)
+u(275)
+u(211)
+u(227)
+u(219)
+u(243)
+u(259)
+u(1955)
+f(3883,30,1)
+u(3907)
+u(3947)
+u(3939)
+u(651)
+u(619)
+u(611)
+f(4475,30,1)
+u(4483)
+u(651)
+u(619)
+u(675)
+f(3099,27,1)
+u(3091)
+u(651)
+u(635)
+u(627)
+f(3139,27,1,6)
+u(3131)
+u(955)
+u(899,1)
+u(3211)
+u(3235)
+u(891)
+u(3227)
+u(3211)
+u(3235)
+u(891)
+u(3227)
+u(819)
+f(2667,30,1,3)
+u(3899)
+u(3867)
+u(651)
+u(619,1)
+u(675)
+f(643,34,1)
+n(667)
+f(3219,30,1,2)
+u(3211)
+u(3235)
+u(947)
+u(939)
+u(3227)
+u(3211)
+u(3235)
+u(947)
+u(939)
+u(3227)
+u(3211)
+u(931)
+u(3123)
+u(851,1)
+u(819)
+u(3107)
+f(3115,44,1)
+f(3155,27,1)
+u(3147)
+u(155)
+u(2019)
+u(323)
+u(3619)
+f(3419,27,1)
+u(3379)
+u(651)
+u(667)
+u(3315)
+u(3307)
+f(3499,27,1)
+u(3483)
+u(3491)
+u(155)
+u(3075)
+u(3059)
+u(3067)
+u(3883)
+u(3891)
+u(3923)
+u(2075)
+u(2083)
+f(3571,27,1)
+u(3579)
+u(3587)
+f(1203,26,1)
+n(1451,5)
+u(1443)
+u(2803)
+u(3603)
+u(3611)
+u(3595)
+u(1435)
+u(1459)
+u(1467)
+u(1483)
+u(1427)
+u(1411,4)
+u(1403,3)
+u(355)
+u(91)
+u(99)
+f(1747,42,1,2)
+f(1475,38,2,1)
+u(1739)
+u(1755)
+u(1747)
+f(1419,37,1)
+u(1475)
+u(2947)
+u(1739)
+u(1755)
+f(2251,23,1,23)
+u(2259,1)
+u(19)
+u(27)
+u(11)
+u(1891)
+u(1179)
+f(2275,24,1,22)
+u(2267)
+u(2283,20)
+u(2315)
+u(2307)
+u(1451,3)
+u(1443)
+u(2803)
+u(3603)
+u(3611)
+u(3595)
+u(1435)
+u(1459)
+u(1467)
+u(1483)
+u(1427)
+u(1411,2)
+u(1475)
+u(1739)
+u(1755)
+f(1747,44,1,1)
+f(1419,40,1)
+u(1475)
+u(2947)
+u(1739)
+u(1755)
+f(2315,29,1,17)
+u(587,1)
+u(579)
+u(571)
+f(691,30,1)
+u(1763)
+u(139)
+f(2331,30,1)
+u(2323)
+u(1099)
+f(2403,30,1,7)
+u(2491)
+u(2355,3)
+u(2387)
+u(2363,1)
+u(2379)
+f(2371,34,1,2)
+f(3547,35,1,1)
+u(3539)
+u(1443)
+u(2803)
+u(3603)
+u(3611)
+u(3595)
+u(1435)
+u(1459)
+u(1467)
+u(1483)
+u(1427)
+u(1411)
+u(1475)
+u(1739)
+u(1755)
+u(1747)
+f(2419,32,1,3)
+u(2411)
+u(2163)
+u(2155)
+u(2443)
+u(2451,2)
+u(2467,1)
+u(2483)
+u(2139)
+f(2475,38,1)
+u(2483)
+u(2459)
+f(3259,37,1)
+f(2435,32,1)
+u(2427)
+u(187)
+f(2531,30,1,2)
+u(2539,1)
+n(3251)
+u(2035)
+u(2027)
+f(2739,30,1,2)
+u(2547,1)
+u(2299)
+f(2731,31,1)
+u(1035)
+f(3203,30,1,3)
+u(3163)
+u(3171,2)
+f(3195,33,1,1)
+f(3187,32,1)
+u(3179)
+f(2315,26,1)
+u(2291)
+u(2755)
+u(2763)
+u(2763)
+u(2747)
+u(851)
+f(2395,26,1)
+f(3859,23,1)
+u(83)
+u(1963)
+u(3523)
+u(3851)
+u(987)
+u(1059)
+f(1451,19,1,3)
+u(1443)
+u(2803)
+u(3603)
+u(3611)
+u(3595)
+u(1435)
+u(1459)
+u(1467)
+u(1483)
+u(1427)
+u(1411,1)
+u(1403)
+u(355)
+u(91)
+u(99)
+f(1419,30,1,2)
+u(1475)
+u(2947)
+u(1739)
+u(1755)
+f(3668,5,2,12)
+u(1220,2)
+u(1236)
+u(1244)
+u(4684)
+u(4716)
+u(1252)
+u(1260)
+f(1228,6,2)
+u(1268)
+f(4732,8,1,1)
+f(1276,6,1,6)
+u(1284)
+u(1356)
+u(1364)
+u(1372)
+u(1380)
+u(1300,2)
+u(1292)
+f(1788,12,2,4)
+u(4692,1)
+n(4708,3)
+u(4692)
+f(1348,6,3,2)
+u(1780)
+u(1308,1)
+u(1316)
+u(1340)
+u(4724)
+f(1324,8,1)
+u(1332)
+u(4700)
+
+search();
+</script></body></html>
