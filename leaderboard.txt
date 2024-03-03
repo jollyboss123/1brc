@@ -1,2 +1,3 @@
+| # | 00:00.640 | [link](https://github.com/jollyboss123/1brc/blob/main/src/main/java/org/jolly/onebrc/CalculateAverage_baseline_loop.java)| 21.0.1-graal | [baseline_loop](https://github.com/baseline_loop) |  |
 | # | 00:00.653 | [link](https://github.com/jollyboss123/1brc/blob/main/src/main/java/org/jolly/onebrc/CalculateAverage_baseline_stream.java)| 21.0.1-graal | [baseline_stream](https://github.com/baseline_stream) |  |
 | # | 00:01.135 | [link](https://github.com/jollyboss123/1brc/blob/main/src/main/java/org/jolly/onebrc/CalculateAverage_baseline_loop.java)| 21.0.1-graal | [baseline_loop](https://github.com/baseline_loop) |  |

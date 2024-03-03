@@ -6,6 +6,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.BiFunction;
 
 /**
  * @author jolly
@@ -15,33 +16,57 @@ import java.util.TreeMap;
  * 2. aggregate into a Map variable but postpone average calculation once loop all lines
  * </p>
  * Findings:
- *
+ * 1. using a {@link Class} in place of a {@link Record} for objects that expect to be mutated over time will serve
+ * better performance since it reduces object creation (i.e. {@link Record} variables are immutable and have to
+ * create new {@link Record} with updated values).
+ * 2. using {@link Map#compute(Object, BiFunction)} may incur some performance overhead because of lambda invocation.
+ * Since in our case our update logic is simple, {@link Map#get(Object)} and {@link Map#put(Object, Object)} is more
+ * efficient. However, if the update logic is complex and involves significant computation, {@link Map#compute(Object, BiFunction)}
+ * is more efficient because the update is performed in a single operation.
  */
 public class CalculateAverage_baseline_loop {
     private static final String MEASUREMENTS_FILE = "./measurements.txt";
-    record Result(double min, double max, double total, int count) {
-        private Result (double temp) {
+
+    static class Result {
+        double min;
+        double max;
+        double total;
+        int count;
+
+        Result(double min, double max, double total, int count) {
+            this.min = min;
+            this.max = max;
+            this.total = total;
+            this.count = count;
+        }
+
+        Result(double temp) {
             this(temp, temp, temp, 1);
         }
 
-        @Override
-        public String toString() {
-            double avg = round(total) / count;
-            return round(min) + "/" + round(avg) + "/" + round(max);
+        void update(double temp) {
+            min = Math.min(min, temp);
+            max = Math.max(max, temp);
+            total += temp;
+            count++;
+        }
+
+        double getAverage() {
+            return round(total) / count;
         }
 
         private double round(double val) {
             return Math.round(val * 10.0) / 10.0;
         }
-    }
-    record Measurement(String name, double temp) {
-        private Measurement(String[] arr) {
-            this(arr[0], Double.parseDouble(arr[1]));
+
+        @Override
+        public String toString() {
+            return round(min) + "/" + round(getAverage()) + "/" + round(max);
         }
     }
 
     public static void main(String[] args) {
-        Map<String, Result> resultMap = new TreeMap<>();
+        TreeMap<String, Result> resultMap = new TreeMap<>();
         List<String> lines;
         try {
             lines = Files.readAllLines(Paths.get(MEASUREMENTS_FILE));
@@ -49,22 +74,19 @@ public class CalculateAverage_baseline_loop {
             throw new RuntimeException(e);
         }
 
-        for (var l : lines) {
-            final Measurement m = new Measurement(l.split(";", 2));
-            resultMap.compute(m.name, (k, v) -> {
-                if (v == null) {
-                    return new Result(m.temp);
-                } else {
-                    return new Result(
-                            Math.min(m.temp, v.min),
-                            Math.max(m.temp, v.max),
-                            v.total + m.temp,
-                            v.count + 1
-                    );
-                }
-            });
+        for (String line : lines) {
+            String[] parts = line.split(";");
+            String name = parts[0];
+            double temp = Double.parseDouble(parts[1]);
+
+            Result result = resultMap.get(name);
+            if (result == null) {
+                resultMap.put(name, new Result(temp));
+            } else {
+                result.update(temp);
+            }
         }
 
-        System.out.println(resultMap);
+        resultMap.forEach((name, result) -> System.out.println(name + ";" + result));
     }
 }
